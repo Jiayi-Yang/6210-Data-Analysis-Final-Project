@@ -1,0 +1,465 @@
+---
+title: "Jiayi Yang STAT 6210 - Final Project"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+Load data
+```{r}
+rm(list=ls())
+setwd("~/Data Analysis/Project")
+options(max.print=1000000)
+anime = read.csv(file = "anime.csv", header = TRUE)
+head(anime)
+```
+Have a look at data
+```{r}
+dim(anime)
+```
+```{r}
+str(anime)
+```
+```{r}
+summary(anime)
+```
+
+Load packages will be used
+```{r}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(reshape)
+library(kernlab)
+```
+Data cleaning 
+split genre into dummy variables
+```{r}
+#install.packages('splitstackshape')
+library(splitstackshape)
+anime_split = cSplit_e(anime, "genre", ",", type = "character", fill = 0)
+```
+Look at the splited data
+```{r}
+str(anime_split)
+```
+```{r}
+colSums(is.na(anime_split))
+```
+
+anime_split has 12,294 rows and 50 variables. I will not include the original genre and id.
+Drop name, genre and id to create new dataframe, and move rating to be the last column
+```{r}
+drops <- c('name','anime_id','genre','rating')
+anime_new = anime_split[ , !(names(anime_split) %in% drops)]
+anime_new = cbind(anime_new,rating = anime_split$rating)
+anime_new = tbl_df(anime_new)
+str(anime_new)
+```
+
+
+change factor to number,drop na and build matrix(only rating has na, since I will use rating as my dependent variable in my regression model, I decide to not use rows contain na in rating)
+```{r}
+aniMat = na.omit(anime_new)
+aniMat$episodes = as.numeric(aniMat$episodes)
+aniMat$type = as.numeric(aniMat$type)
+str(aniMat)
+```
+see dist of each variable
+```{r}
+set.seed(1234)
+aniMat = as.data.frame(aniMat)
+aniMat.melt <- melt(aniMat)
+ggplot(aniMat.melt,aes(x=value))+geom_density()+facet_wrap(~variable,scales="free")
+ggplot(aniMat.melt,aes(x=value))+geom_histogram()+facet_wrap(~variable,scales="free")
+```
+confidence interval of rating
+```{r}
+#cannot use shapiro test to test normality because sample size is larger than 5000
+plot(density(aniMat$rating))
+```
+```{r}
+#CI for normal approximation
+t.test(aniMat$rating)
+```
+```{r}
+#CI for bootstrap
+x = aniMat$rating
+xmean = mean(x)
+boots = matrix(0,10000,1)
+for(i in 1:10000){
+  xsample = sample(x,size = 20,replace = TRUE)
+  boots[i] = mean(xsample)
+}
+hist(boots-xmean,100)
+```
+```{r}
+xmean+quantile(boots-xmean,c(0.05,0.95))
+```
+
+see correlation
+```{r}
+cor(aniMat)
+```
+```{r}
+library(corrplot)
+corrplot(cor(aniMat))
+```
+there are high correlations between genre_Mecha and genre_Sci-Fi, also genre_space and genre_SciFi.
+
+plot bivariate graphs including Y
+```{r}
+aniMat.melt2 <- cbind(aniMat.melt,y=aniMat$rating)
+ggplot(aniMat.melt2,aes(x=value,y=y))+stat_bin2d()+facet_wrap(~variable,scales="free")
+```
+
+
+We will now build linear models using best subset selection, forward and backward stepwise selection. After studying the residuals, we will check if any transformations are necessary.
+
+```{r}
+library(leaps)
+regfit.full <- regsubsets(rating~.,aniMat,nvmax=46)
+summary(regfit.full)
+```
+
+```{r}
+regfit.summary <- summary(regfit.full)
+names(regfit.summary)
+```
+```{r}
+plot(regfit.summary$rsq)
+```
+```{r}
+plot(regfit.summary$bic)
+which.min(regfit.summary$bic)
+```
+The lowest BIC is achieved by the 28th model.
+```{r}
+coef(regfit.full,28)
+```
+
+
+We will also check the models chosen by best subset selection using cross validation.
+```{r}
+library(boot)
+CVmse <- rep(0,46)
+for(i in 1:46){
+tempCols <- which(regfit.summary$which[i,-1]==TRUE)
+tempCols <- c(tempCols,47)
+tempCols <- as.numeric(tempCols)
+tempGLM <- glm(rating~.,data=aniMat[,tempCols])
+tempCV <- cv.glm(tempGLM,data=aniMat[,tempCols],K = 10)
+CVmse[i] <- tempCV$delta[1]
+}
+plot(CVmse)
+print(which.min(CVmse))
+print(min(CVmse))
+print(CVmse)
+```
+
+Forward Stepwise Selection
+```{r}
+regfit.fwd <- regsubsets(rating~.,aniMat,nvmax=46,method="forward")
+summary(regfit.fwd)
+```
+
+```{r}
+regfit.fwd.summary <- summary(regfit.fwd)
+which.min(regfit.fwd.summary$bic)
+```
+
+Backward Stepwise Selection
+```{r}
+regfit.bwd <- regsubsets(rating~.,aniMat,nvmax=46,method="backward")
+summary(regfit.bwd)
+```
+```{r}
+regfit.bwd.summary <- summary(regfit.bwd)
+which.min(regfit.bwd.summary$bic)
+```
+LASSO
+```{r}
+library(glmnet)
+lasso.cv <- cv.glmnet(x=as.matrix(aniMat[,-47]),y=as.matrix(aniMat[,47]),alpha=1,nfolds = 10)
+plot(lasso.cv)
+print(min(lasso.cv$cvm))
+```
+The lost mse from LASSO is a little bit higher than the one I obtained with best subset selection.So the best model up to now is from best subset selection.
+
+Ridge Regression
+```{r}
+library(glmnet)
+ridge.cv <- cv.glmnet(x=as.matrix(aniMat[,-47]),y=as.matrix(aniMat[,47]),alpha=0,nfolds = 10)
+rid.fit = cv.glmnet(x=as.matrix(aniMat[,-47]),y=as.matrix(aniMat[,47]),family="gaussian", alpha=0)
+min(rid.fit$cvm)
+```
+
+
+```{r}
+setnames(aniMat, "genre_Slice of Life", "genre_SliceofLife")
+setnames(aniMat, "genre_Sci-Fi", "genre_SciFi")
+```
+Nonlinear effects
+check if any nonlinear transformations are necessary. first start by fitting the linear model.Since the feature selection gives me two models: 28th and 34th. I will build both two models to compare the results.
+```{r}
+#model for 34th
+lm1 <- lm(rating ~. -genre_Vampire-genre_Yaoi-genre_Yuri-genre_Space-`genre_Shoujo Ai`-genre_Samurai-`genre_Martial Arts`-genre_Mecha-genre_Harem-genre_Demons-genre_Game-genre_Cars, data=aniMat)
+```
+
+```{r}
+aniMat.melt3 <- cbind(aniMat.melt,resid=lm1$residuals)
+ggplot(aniMat.melt3,aes(x=value,y=resid))+geom_point()+geom_smooth(method="loess")+facet_wrap(~variable)
+```
+There are obvious non-linearities with respect to members.
+```{r}
+#model for 28th
+lm2 <- lm(rating ~genre_Supernatural+genre_SliceofLife+genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+episodes+members+genre_Action+genre_Adventure+genre_Comedy, data=aniMat)
+aniMat.melt4 <- cbind(aniMat.melt,resid=lm2$residuals)
+ggplot(aniMat.melt4,aes(x=value,y=resid))+geom_point()+geom_smooth(method="loess")+facet_wrap(~variable)
+```
+There are obvious non-linearities with respect to members.
+
+
+
+```{r}
+#chose number of ploy for lm1
+memMSE <- rep(0,5)
+for(i in 1:5){
+templm <- glm(rating ~. -genre_Vampire-genre_Yaoi-genre_Yuri-genre_Space-`genre_Shoujo Ai`-genre_Samurai-`genre_Martial Arts`-genre_Mecha-genre_Harem-genre_Demons-genre_Game-genre_Cars-members+poly(members,i), data=aniMat)
+tempCV <- cv.glm(aniMat,templm,K = 10)
+memMSE[i] <- tempCV$delta[1]
+}
+plot(memMSE)
+print(which.min(memMSE))
+print(min(memMSE))
+```
+Minimum is obtained with a 4th degree polynomial for members with MSE equal 0.6333695. So include it.
+```{r}
+#chose number of ploy for lm2
+memMSE <- rep(0,5)
+for(i in 1:5){
+templm <- glm(rating ~genre_Supernatural+genre_SliceofLife+genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+episodes+genre_Action+genre_Adventure+genre_Comedy+poly(members,i), data=aniMat)
+tempCV <- cv.glm(aniMat,templm,K = 10)
+memMSE[i] <- tempCV$delta[1]
+}
+plot(memMSE)
+print(which.min(memMSE))
+print(min(memMSE))
+```
+Minimum is obtained with a 4th degree polynomial for members with MSE equal 0.6354152.So include it and compare them.
+
+Final model with members 4th
+```{r}
+finalLm <- lm(rating ~. -genre_Vampire-genre_Yaoi-genre_Yuri-genre_Space-`genre_Shoujo Ai`-genre_Samurai-`genre_Martial Arts`-genre_Mecha-genre_Harem-genre_Demons-genre_Game-genre_Cars-members+poly(members,4), data=aniMat)
+summary(finalLm)
+```
+```{r}
+finalLm2 <- lm(rating~genre_Supernatural+genre_SliceofLife+genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+episodes+genre_Action+genre_Adventure+genre_Comedy+poly(members,4), data=aniMat)
+summary(finalLm2)
+anova(finalLm,finalLm2,test="F")
+```
+anova test shows my second model is better.
+
+```{r}
+finalGLM<- glm(rating ~. -genre_Vampire-genre_Yaoi-genre_Yuri-genre_Space-`genre_Shoujo Ai`-genre_Samurai-`genre_Martial Arts`-genre_Mecha-genre_Harem-genre_Demons-genre_Game-genre_Cars-members+poly(members,4), data=aniMat)
+
+finalGLM2<- glm(rating~genre_Supernatural+genre_SliceofLife+genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+episodes+genre_Action+genre_Adventure+genre_Comedy+poly(members,4), data=aniMat)
+```
+
+```{r}
+cv.glm(aniMat,finalGLM,K=10)$delta[1]
+cv.glm(aniMat,finalGLM2,K=10)$delta[1]
+```
+MSE also shows my second model is better. Also my MSE decreases from 0.69 to 0.63.
+
+```{r}
+library(car)
+qqPlot(finalLm2)
+```
+
+```{r}
+plot(finalLm2,which=4)
+```
+
+
+
+```{r}
+aniMat[c(41,87,805),]
+```
+
+We try removing these outliers and fitting the model again.
+```{r}
+finalLmWO <- lm(rating~genre_Supernatural+genre_SliceofLife+genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+episodes+genre_Action+genre_Adventure+genre_Comedy+poly(members,4), data=aniMat[-c(41,87,805),])
+summary(finalLmWO)
+```
+
+
+```{r}
+qqPlot(finalLmWO)
+```
+
+
+check for homoskedasticity
+```{r}
+library(car)
+ncvTest(finalLm2)
+```
+```{r}
+ncvTest(finalLmWO)
+```
+
+```{r}
+boot.fn <- function(data,index){
+tempLm <- lm(rating~genre_Supernatural+genre_SliceofLife+genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+episodes+genre_Action+genre_Adventure+genre_Comedy+poly(members,4),data=data,subset=index)
+tempCoef <- coef(tempLm)
+return(tempCoef)
+}
+boot(aniMat,boot.fn,R=1000)
+```
+Splines
+```{r}
+library(mgcv)
+library(gamclass)
+library(ggplot2)
+```
+
+
+```{r}
+aniMat = as.data.frame(aniMat)
+gam.a<- gam(rating~genre_Supernatural+genre_SliceofLife +genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+episodes+genre_Action+genre_Adventure+genre_Comedy+s(members), data = aniMat)
+summary(gam.a)
+```
+
+```{r}
+CVgam(formula(gam.a),aniMat,nfold=10)
+anova(finalLm2,gam.a,test="F")
+```
+MSE becomes 0.5822 now.
+Try add spline on episodes.
+```{r}
+gam.a2<- gam(rating~genre_Supernatural+genre_SliceofLife +genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+s(episodes)+genre_Action+genre_Adventure+genre_Comedy+s(members), data = aniMat)
+summary(gam.a2)
+CVgam(formula(gam.a2),aniMat,nfold=10)
+anova(gam.a,gam.a2,test="F")
+```
+MSE becomes 0.5761 now.
+```{r}
+plot(gam.a2)
+```
+
+```{r}
+memList <- list()
+memList[[1]] <- gam(rating ~ genre_Supernatural + genre_SliceofLife + genre_Sports + 
+    genre_Shoujo + genre_Shounen + genre_Romance + genre_School + 
+    genre_SciFi + genre_Seinen + genre_Music + genre_Mystery + 
+    genre_Police + genre_Psychological + genre_Kids + genre_Military + 
+    genre_Hentai + genre_Historical + genre_Horror + genre_Josei + 
+    genre_Dementia + genre_Drama + genre_Fantasy + type + s(episodes) + 
+    genre_Action + genre_Adventure + genre_Comedy + members,data=aniMat)
+for(i in 2:10){
+memList[[i]] <- gam(rating ~ genre_Supernatural + genre_SliceofLife + genre_Sports + 
+    genre_Shoujo + genre_Shounen + genre_Romance + genre_School + 
+    genre_SciFi + genre_Seinen + genre_Music + genre_Mystery + 
+    genre_Police + genre_Psychological + genre_Kids + genre_Military + 
+    genre_Hentai + genre_Historical + genre_Horror + genre_Josei + 
+    genre_Dementia + genre_Drama + genre_Fantasy + type + s(episodes) + 
+    genre_Action + genre_Adventure + genre_Comedy + s(members,k=i+1),data=aniMat)
+}
+memMSE <- rep(0,10)
+for(i in 1:10){
+memMSE[i] <- CVgam(formula(memList[[i]]),aniMat)$cvscale
+}
+```
+k=10 gives lowest mse 
+```{r}
+gam.a2.final<- gam(rating~genre_Supernatural+genre_SliceofLife +genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+type+s(episodes)+genre_Action+genre_Adventure+genre_Comedy+s(members,k=10), data = aniMat)
+summary(gam.a2.final)
+CVgam(formula(gam.a2.final),aniMat,nfold=10)
+plot(gam.a2.final)
+```
+
+Interaction terms
+Remember that type and episodes had 45% correlation.
+```{r}
+ggplot(aniMat,aes(x=type,y=episodes))+stat_density2d()
+```
+
+
+```{r}
+gam.a2.final2<- gam(rating~genre_Supernatural+genre_SliceofLife +genre_Sports+genre_Shoujo+
+genre_Shounen+genre_Romance+genre_School+genre_SciFi+genre_Seinen+genre_Music+genre_Mystery+
+genre_Police+genre_Psychological+genre_Kids+genre_Military+genre_Hentai+genre_Historical+genre_Horror+genre_Josei+
+genre_Dementia+genre_Drama+genre_Fantasy+s(episodes,type)+genre_Action+genre_Adventure+genre_Comedy+s(members,k=10), data = aniMat)
+summary(gam.a2.final2)
+CVgam(formula(gam.a2.final2),aniMat,nfold=10)
+```
+Lower MSE 0.5709
+```{r}
+plot(gam.a2.final2)
+```
+Extra method: Elastic Net with glnet 0<alpha<1
+
+```{r}
+en.fit = cv.glmnet(as.matrix(aniMat[,-47]),as.matrix(aniMat[,47]),family="gaussian", alpha=0.5)
+min(en.fit$cvm)
+```
+Extra method:Least Angle Regression(LAR)
+```{r}
+#install.packages('lars')
+library(lars)
+mselars = cv.lars(as.matrix(aniMat[,-47]),as.matrix(aniMat[,47]),K = 10,trace = FALSE, plot.it = TRUE, se = TRUE,type = c("lar"))
+min(mselars$cv)
+which.min(mselars$cv)
+```
+The lost mse from LAR(0.6928072) is a little bit higher than the one I obtained with best subset selection.
+Huge
+```{r}
+#install.packages('huge')
+library(huge)
+```
+```{r}
+aniMx = as.matrix(aniMat)
+huge(aniMx)
+h0 = huge(aniMx)
+```
+```{r}
+plot.huge(h0)
+```
+```{r}
+h1 = huge(aniMx,lambda = 0.1)
+plot.huge(h1)
+```
+```{r}
+h2 = huge(aniMx,lambda = 0.3)
+plot.huge(h2)
+```
+
+
+
+
